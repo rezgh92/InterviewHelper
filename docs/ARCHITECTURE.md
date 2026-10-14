@@ -14,7 +14,7 @@ that share one speech and intelligence pipeline:
 |---|---|---|
 | **Prep** | Turns your résumé, the job description and a short guided conversation into a *talking-points bank*: your stories, projects, numbers, and the two or three points you want to land on each topic. | You and the AI, offline |
 | **Mock interview** | The AI plays the interviewer by voice, asks role-specific questions, listens to your spoken answer, and gives immediate structured feedback, a score, and a tighter model version of *your* answer. Weak spots are tracked and drilled with spaced repetition. | You and the AI |
-| **Live cues** | Listens to a real conversation, detects when a question has finished, classifies it, and shows a small card with the matching items *from your own bank* as keywords plus an answer scaffold (STAR, system-design checklist, trade-off framing). | You and a human interviewer |
+| **Live cues** | Listens to a real conversation, detects when a question has finished, classifies it, and shows a small card with the matching items *from your own bank*: the one-to-three-sentence opener you rehearsed for that story, the keywords to hit after it, and an answer scaffold (STAR, system-design checklist, trade-off framing). | You and a human interviewer |
 
 The same pipeline (audio capture → streaming speech-to-text → turn detection →
 question understanding → retrieval → Claude → compact UI) powers all three.
@@ -24,9 +24,13 @@ product value and most of the engineering live.
 ### Ground rules baked into the design
 
 - **Cues come from your bank, not from the model's imagination.** The live
-  card is retrieval-first. Claude's job in live mode is to classify the question,
-  pick the right items, and compress them into a few words. If nothing in the
-  bank matches, the card shows only the scaffold for that question type.
+  card is retrieval-first. Claude's job in live mode is to classify the question
+  and pick the right items. The sentences on the card are openers you wrote
+  and rehearsed in prep; the model does not compose new answers to questions
+  you did not prepare. If nothing in the bank matches, the card shows only the
+  scaffold for that question type. Composed answers exist in mock mode, where
+  they teach you, and in a disclosed-use setting where the other party knows
+  an assistant is in use.
 - **No concealment features.** No eye-movement masking, no hiding from screen
   share, no "look natural" tooling. A visible recording indicator is always on
   while the microphone or system audio is open.
@@ -47,13 +51,17 @@ product value and most of the engineering live.
 - Résumé and job-description import; guided "tell me about this project"
   conversation that extracts STAR stories, metrics and talking points.
 - Talking-points bank with tags, search, and an "is this still true?" review.
+- Rehearsed openers: every story and talking point gets a one-to-three-sentence
+  opener, drafted with Claude from your real details, edited by you, and
+  rehearsed in mock mode until it sounds like you.
 - Mock interview: voice interviewer, role and seniority presets, question bank
   seeded per role (behavioral, technical, system design, situational).
 - Per-answer feedback: structure, specificity, metrics, rambling, filler words,
   pace, talk time; a rewritten tighter answer in your own voice.
 - Weak-spot tracker with spaced repetition (FSRS scheduler).
-- Live cue card: question detected → 2–3 bank items as keywords + scaffold +
-  one-line angle. Compact always-on-top panel, keyboard toggle, one-click pause.
+- Live cue card: question detected → your rehearsed opener for the best match,
+  2–3 keywords to hit after it, scaffold, one-line angle. Compact always-on-top
+  panel, keyboard toggle, one-click pause.
 - Post-session debrief: full transcript with speaker labels, what you said vs.
   what you planned to say, follow-up questions you were asked, and a draft
   thank-you email.
@@ -270,15 +278,18 @@ Local SQLite with `sqlite-vec` for embeddings. Core tables:
 - `profile` — target role, seniority, companies, preferences.
 - `bank_items` — one row per story / fact / talking point: `kind`
   (story, project, metric, value, weakness, question-to-ask), `title`,
-  `body`, `tags[]`, `scaffold` (STAR fields for stories), `embedding`,
-  `last_reviewed`, `confidence`.
+  `body`, `tags[]`, `scaffold` (STAR fields for stories), `opener` (the
+  rehearsed one-to-three sentences), `embedding`, `last_reviewed`,
+  `confidence`, `rehearsal_count`.
 - `questions` — seeded and generated questions, `type`, `tags`, `difficulty`.
 - `sessions`, `turns` (speaker, start/end ms, text, channel), `cues`,
   `feedback`, `srs_cards`.
 
 Items are written by the Prep conversation (Claude extracts them from your
-answers and asks for the missing numbers), by Mock sessions ("that answer was
-good, save it"), and by hand.
+answers, asks for the missing numbers, and drafts an opener for you to edit),
+by Mock sessions ("that answer was good, save it as the opener"), and by hand.
+An opener is marked rehearsed only after you have said it aloud in mock mode
+at least twice.
 
 ### Claude routes
 
@@ -304,6 +315,10 @@ every Opus call so a safeguard decline never leaves the user with an empty card.
   "question_type": "behavioral | technical | system_design | situational | culture | logistics",
   "tags": ["conflict", "stakeholders"],
   "scaffold": "STAR",
+  "opener": {
+    "text": "The closest thing I've done is the payments migration last year, where we cut p95 latency by 40%. The hard part wasn't the code, it was getting two teams to agree on the cutover plan.",
+    "bank_item_id": "story_12"
+  },
   "cues": [
     { "text": "Payments migration — cut p95 latency 40%", "bank_item_id": "story_12" },
     { "text": "Pushed back on scope with data, not opinion", "bank_item_id": "story_12" },
@@ -314,9 +329,22 @@ every Opus call so a safeguard decline never leaves the user with an empty card.
 }
 ```
 
-Below a confidence threshold the card shows only `scaffold` and `question_type`.
 Every cue carries the `bank_item_id` it came from, so the debrief can show which
 prepared material you actually used.
+
+### What the card shows: three levels
+
+| Match confidence | Card content | Where it comes from | Time to screen |
+|---|---|---|---|
+| High (one story clearly fits) | Your rehearsed **opener**, full text, then 2–3 keywords, then the scaffold | Retrieval only, no generation on the critical path | ≈ 0.5 s after end of question |
+| Medium (several items fit) | 2–3 **keywords** from the best items plus a one-line angle | Retrieval plus a short Claude compression | ≈ 1.2 s |
+| Low (nothing prepared) | **Scaffold** for the question type, nothing else | Static | immediate |
+
+The opener path is the fastest precisely because nothing is being written on
+the spot. The sentences were written and rehearsed earlier, so they come back
+as your own words under stress. Questions that land on the low level are
+logged and become the next mock-mode drill, which is how the bank grows to
+cover them.
 
 ### Prompt caching layout
 
@@ -338,7 +366,7 @@ and shown in a dev panel so regressions are visible.
 | Classify + retrieve | ~0 ms on critical path | Done speculatively on partials |
 | Cue first token | 300–700 ms | Cached prefix, low effort, streaming |
 | Render | ≤ 50 ms | Stream tokens into the card |
-| **First cue visible** | **≤ 1.2 s** | |
+| **First cue visible** | **≤ 1.2 s** | ≈ 0.5 s on the rehearsed-opener path |
 | **Full card** | **≤ 2.5 s** | |
 
 ---
